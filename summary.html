@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Architecture Summary: Adaptive Real-Time UDP Protocol</title>
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; line-height: 1.6; max-width: 900px; margin: 2rem auto; padding: 0 1rem; color: #333; }
+        h1, h2, h3 { color: #2c3e50; }
+        code { background: #f1f5f9; padding: 0.2rem 0.4rem; border-radius: 4px; font-family: monospace; }
+        .box { background: #f8fafc; border-left: 4px solid #3b82f6; padding: 1rem; margin: 1.5rem 0; }
+    </style>
+</head>
+<body>
+    <h1>System Architecture & Design Summary</h1>
+    <p>This document details the design choices for our custom real-time audio transport protocol over UDP, built to survive hostile network conditions (drop, jitter, duplication, reordering) without exceeding strict bandwidth overhead limits.</p>
+
+    <h2>1. The Wire Protocol</h2>
+    <p>To support dynamic error correction and sequence tracking, we designed a custom 166-byte wire format (adding 6 bytes of overhead to the 160-byte payload):</p>
+    <ul>
+        <li><code>uint8_t type</code>: Identifies if the packet is Data (0) or FEC Parity (1).</li>
+        <li><code>uint32_t seq</code>: The sequence number (or Base Sequence for parity packets).</li>
+        <li><code>uint8_t fec_size</code>: The current redundancy block size.</li>
+        <li><code>uint8_t payload[160]</code>: The actual audio payload or the computed XOR parity.</li>
+    </ul>
+
+    <h2>2. Receiver-Driven Intelligence</h2>
+    <p>Because the receiver is the only component that actually knows the condition of the network, the architecture offloads almost all decision-making to the receiver. The sender simply packages data, calculates parity, and blindly listens for feedback.</p>
+    
+    <div class="box">
+        <h3>Adaptive Forward Error Correction (FEC)</h3>
+        <p>ARQ (retransmission) is fatal in real-time audio because round-trip times often exceed the playback deadline. Instead, we use proactive XOR-based Forward Error Correction. The sender groups packets and sends an XOR parity block. If one packet in that group is dropped by the relay, the receiver mathematically reconstructs it before the deadline using <code>Missing = Parity XOR (Sum of Arrived)</code>.</p>
+    </div>
+
+    <h2>3. The Feedback Loop</h2>
+    <p>Every 500ms, the receiver calculates the exact packet loss percentage. It sends a 1-byte control message back to the sender via the feedback port (47003 -> 47004). If the network is clean, the receiver requests a large FEC group (e.g., 10 packets), minimizing bandwidth overhead. If burst loss is detected, the receiver instructs the sender to shrink the group size (down to 2), dramatically increasing protection while staying beneath the 2.0x overhead cap.</p>
+
+    <h2>4. Strict Deadline Jitter Buffering</h2>
+    <p>Rather than using a generic queue, the receiver relies on the system clock and strict math based on <code>T0</code> and <code>DELAY_MS</code>. The receiver loop uses <code>select()</code> with a microsecond timeout calculated precisely against the absolute playback deadline of the next expected frame. This ensures we wait exactly as long as legally possible for late or out-of-order packets to arrive (or be recovered via FEC) without ever missing a deadline.</p>
+
+    <h2>5. Pipeline Defenses</h2>
+    <ul>
+        <li><strong>Deduplication:</strong> A hash set (<code>std::unordered_set</code>) of seen sequence numbers immediately drops duplicates introduced by the relay.</li>
+        <li><strong>Reordering:</strong> A <code>std::map</code> naturally reorders packets by sequence number as they arrive over the wire.</li>
+        <li><strong>Memory Safety:</strong> A sliding window mechanism aggressively garbage-collects old packets and FEC blocks to prevent memory leaks in the endless loop.</li>
+    </ul>
+</body>
+</html>
